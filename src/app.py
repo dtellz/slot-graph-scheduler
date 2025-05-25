@@ -26,6 +26,7 @@ async def websocket_endpoint(websocket: WebSocket):
             data = await websocket.receive_text()
             message_data = json.loads(data)
 
+            # TODO(auth): we currently ignore the token; add real auth in production.
             thread_id: str | None = message_data.get("thread_id")
             token: str | None = message_data.get("token")
             message: str | None = message_data.get("message")
