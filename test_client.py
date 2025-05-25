@@ -10,12 +10,22 @@ async def connect_and_chat():
     
     try:
         print("Connecting to the appointment scheduler...")
+        print(f"Using thread ID: {thread_id}")
         async with websockets.connect(uri) as websocket:
-            welcome = await websocket.recv()
-            welcome_data = json.loads(welcome)
-
-            print(f"Server: {welcome_data['response']}")
-            thread_id = welcome_data.get('thread_id', thread_id)
+            # Send an initial message to start the conversation
+            await send_message(websocket, thread_id, "Hello")
+            
+            # Get the initial response
+            response = await websocket.recv()
+            response_data = json.loads(response)
+            
+            # Check if this is an error message or a regular response
+            if 'error' in response_data:
+                print(f"Server Error: {response_data['error']}")
+            elif 'message' in response_data:
+                print(f"Server: {response_data['message']}")
+            else:
+                print(f"Server sent: {response_data}")
             
             while True:
                 user_input = input("You: ")
@@ -27,7 +37,14 @@ async def connect_and_chat():
                 
                 response = await websocket.recv()
                 response_data = json.loads(response)
-                print(f"Server: {response_data['response']}")
+                
+                # Check if this is an error message or a regular response
+                if 'error' in response_data:
+                    print(f"Server Error: {response_data['error']}")
+                elif 'message' in response_data:
+                    print(f"Server: {response_data['message']}")
+                else:
+                    print(f"Server sent: {response_data}")
     
     except websockets.exceptions.ConnectionClosedError:
         print("\nConnection closed by the server. Make sure the server is running.")

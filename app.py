@@ -6,18 +6,21 @@ uses a state machine to control the appointment scheduling process.
 """
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from typing import Dict
 import json
-import uuid
+from typing import Dict
 
-from state_machine import AppointmentStateMachine
+from graph_manager import GraphManager
 
 app = FastAPI(title="Medical Appointment Scheduler")
 
-type ThreadId = str
+# Create an instance of the GraphManager
+graph_manager = GraphManager()
 
+# Define thread ID type alias
+ThreadId = str
+
+# Store active connections
 active_connections: Dict[ThreadId, WebSocket] = {}
-conversation_states: Dict[ThreadId, AppointmentStateMachine] = {}
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -37,38 +40,49 @@ async def websocket_endpoint(websocket: WebSocket):
     """
     await websocket.accept()
     
-    thread_id = str(uuid.uuid4())
-    await websocket.send_text(json.dumps({
-        "thread_id": thread_id,
-        "response": "Welcome to the Medical Appointment Scheduler. How can I help you schedule your appointment today?"
-    }))
-    
     try:
-        active_connections[thread_id] = websocket
-        state_machine = AppointmentStateMachine()
-        conversation_states[thread_id] = state_machine
-        
         while True:
+            # Receive a message
             data = await websocket.receive_text()
             message_data = json.loads(data)
             
-            client_thread_id = message_data.get("thread_id")
+            # Extract required fields
+            thread_id = message_data.get("thread_id")
+            token = message_data.get("token")
             message = message_data.get("message")
             
-            if client_thread_id:
-                thread_id = client_thread_id
+            if not thread_id or not token or not message:
+                await websocket.send_text(json.dumps({
+                    "error": "Missing required fields: thread_id, token, and message are required"
+                }))
+                continue
             
-            response = state_machine.process_message(message)
+            # Store the connection
+            active_connections[thread_id] = websocket
             
+            # Process the message using the graph manager
+            response = graph_manager.process_message(thread_id, token, message)
+            
+            # Send the response
             await websocket.send_text(json.dumps({
                 "thread_id": thread_id,
-                "response": response
+                "message": response
             }))
-            
+    
     except WebSocketDisconnect:
+        # Remove connection when disconnected
         for thread_id, conn in list(active_connections.items()):
             if conn == websocket:
-                del active_connections[thread_id]
+                active_connections.pop(thread_id)
+                break
+    except Exception as e:
+        # Handle any exceptions
+        try:
+            await websocket.send_text(json.dumps({
+                "error": f"An error occurred: {str(e)}"
+            }))
+        except Exception:
+            pass
 
 @app.get("/")
 async def root():
