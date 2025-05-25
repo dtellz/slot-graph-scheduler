@@ -4,18 +4,21 @@ import json
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
-from graph_manager import GraphManager
+from src.graph_manager import GraphManager
 
 app = FastAPI(title="Medical Appointment Scheduler")
 
 graph_manager = GraphManager()
 
-# active WebSocket connections, keyed by thread_id
 active_connections: dict[str, WebSocket] = {}
 
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
+    """Handle WebSocket connections and messages.
+    
+    Processes incoming messages and routes them through the graph manager.
+    """
     await websocket.accept()
 
     try:
@@ -23,7 +26,6 @@ async def websocket_endpoint(websocket: WebSocket):
             data = await websocket.receive_text()
             message_data = json.loads(data)
 
-            # Extract required fields from message data with type hints
             thread_id: str | None = message_data.get("thread_id")
             token: str | None = message_data.get("token")
             message: str | None = message_data.get("message")
@@ -35,8 +37,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 continue
 
             active_connections[thread_id] = websocket
-
-            # async call into the graph manager
+            
             response = await graph_manager.process_message(thread_id, token, message)
 
             await websocket.send_text(json.dumps({"thread_id": thread_id, "message": response}))
@@ -55,6 +56,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
 @app.get("/")
 async def root():
+    """Root endpoint providing basic API information."""
     return {
         "message": "Medical Appointment Scheduler API — connect to /ws via WebSocket."
     }

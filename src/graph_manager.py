@@ -3,11 +3,11 @@ from __future__ import annotations
 import asyncio
 from enum import Enum, auto
 
-from langgraph.graph import END, StateGraph
+from langgraph.graph import StateGraph, END
 from pydantic import BaseModel, Field
 
-from mock_client import MockApiClient
-from slots import Slot, build_default_slots
+from src.mock_client import MockApiClient
+from src.slots import Slot, build_default_slots
 
 
 class SlotState(Enum):
@@ -49,10 +49,8 @@ class GraphManager:
         self._threads: dict[str, dict] = {}
         self._lock = asyncio.Lock()
 
-    # --------------------------------------------------------------------- #
-    #  LangGraph construction
-    # --------------------------------------------------------------------- #
     def _build_graph(self) -> StateGraph:
+        """Build the LangGraph state machine for conversation flow."""
         g = StateGraph(SlotFillingState)
 
         g.add_node("init", self._init_state)
@@ -81,10 +79,8 @@ class GraphManager:
         g.add_edge("complete", END)
         return g
 
-    # ------------------------------------------------------------------ #
-    #  LangGraph node implementations
-    # ------------------------------------------------------------------ #
     def _init_state(self, state: SlotFillingState) -> SlotFillingState:
+        """Initialize the conversation state with slot definitions."""
         if not state.slot_order:
             state.slot_order = [slot.name for slot in self.slot_definitions]
             state.slot_values = {s: None for s in state.slot_order}
@@ -92,6 +88,10 @@ class GraphManager:
         return state
 
     def _detect_intent(self, state: SlotFillingState) -> SlotFillingState:
+        """Detect user intent from the message.
+        
+        Analyzes the user message to determine intent and updates state accordingly.
+        """
         msg = (state.user_message or "").strip()
         if state.first_message or not msg:
             state.first_message = False
@@ -101,17 +101,68 @@ class GraphManager:
             return state
 
         msg_low = msg.lower()
-
-        # change request
-        for i, slot_name in enumerate(state.slot_order):
-            if slot_name in msg_low and "change" in msg_low and state.slot_values[slot_name]:
-                state.current_slot_index = i
-                state.slot_states[slot_name] = SlotState.CHANGING
-                # reset dependents
-                for j in range(i + 1, len(state.slot_order)):
-                    dep = state.slot_order[j]
-                    state.slot_values[dep] = None
-                    state.slot_states[dep] = SlotState.EMPTY
+        
+        if "change" in msg_low:
+            referenced_slot = None
+            slot_index = -1
+            
+            for i, slot_name in enumerate(state.slot_order):
+                # Only consider slots that have been filled
+                if state.slot_values[slot_name] is None:
+                    continue
+                    
+                # Check if this slot is mentioned in the change request
+                if slot_name in msg_low:
+                    referenced_slot = slot_name
+                    slot_index = i
+                    break
+                    
+            if referenced_slot is None:
+                # No valid slot mentioned
+                return state
+                
+            # Try to extract the new value from the message
+            new_value = None
+            available_options = self._options_for_slot(state, referenced_slot)
+            
+            # Look for "to <value>" pattern
+            if " to " in msg_low:
+                value_part = msg_low.split(" to ", 1)[1].strip()
+                
+                # Try to match against available options
+                for option in available_options:
+                    if option.lower() in value_part or value_part in option.lower():
+                        new_value = option
+                        break
+            
+            # Set the new value and reset downstream slots
+            if new_value:
+                # Update the slot with the new value
+                state.slot_values[referenced_slot] = new_value
+                state.slot_states[referenced_slot] = SlotState.CHANGING
+                
+                # Reset all downstream/dependent slots
+                for j in range(slot_index + 1, len(state.slot_order)):
+                    downstream_slot = state.slot_order[j]
+                    state.slot_values[downstream_slot] = None
+                    state.slot_states[downstream_slot] = SlotState.EMPTY
+                
+                # Move to the next slot for prompting
+                if slot_index < len(state.slot_order) - 1:
+                    # Move to the next slot
+                    state.current_slot_index = slot_index + 1
+                    next_slot = state.slot_order[state.current_slot_index]
+                    
+                    # Prepare for prompting for the next slot
+                    state.awaiting_slot_input = True
+                    next_options = self._options_for_slot(state, next_slot)
+                    
+                    # Set response message to confirm the change and prompt for next slot
+                    state.response_message = f"Changed {referenced_slot} to {new_value}. Please select a {next_slot}. Options: {', '.join(next_options)}"
+                else:
+                    # This was the last slot, just confirm the change
+                    state.response_message = f"Changed {referenced_slot} to {new_value}."
+                    
                 return state
 
         # new appointment after finishing
@@ -129,10 +180,17 @@ class GraphManager:
             return "prompt"
         if state.awaiting_slot_input:
             return "process"
+            
+        # If a slot is marked as CHANGING, we need to prompt for the next slot
+        # This is crucial for handling "change X to Y" intents
         if any(st == SlotState.CHANGING for st in state.slot_states.values()):
+            # Mark that we're awaiting input for the current slot
+            state.awaiting_slot_input = True
             return "prompt"
+            
         if all(state.slot_values.values()):
             return "done"
+            
         return "process"
 
     def _process_slot_input(self, state: SlotFillingState) -> SlotFillingState:
@@ -208,26 +266,94 @@ class GraphManager:
     #  Persistence helpers (thread-safe)
     # ------------------------------------------------------------------ #
     async def _load_state(self, thread_id: str) -> SlotFillingState:
+        """Load conversation state for a thread from persistence."""
         async with self._lock:
             raw = self._threads.get(thread_id)
         return SlotFillingState.model_validate(raw) if raw else SlotFillingState()
 
     async def _save_state(self, thread_id: str, state) -> None:
+        """Save conversation state for a thread to persistence."""
         serialisable = state.model_dump() if hasattr(state, "model_dump") else dict(state)
         async with self._lock:
             self._threads[thread_id] = serialisable
 
-    # ------------------------------------------------------------------ #
-    #  Public API
-    # ------------------------------------------------------------------ #
     async def process_message(self, thread_id: str, _token: str, message: str) -> str:
+        """Process an incoming user message.
+        
+        Loads state, processes the message through the graph, and saves the updated state.
+        """
         state = await self._load_state(thread_id)
+        message_lower = message.lower()
+        
+        if "change" in message_lower and " to " in message_lower:
+            change_response = self._handle_change_intent(state, message_lower)
+            if change_response:
+                await self._save_state(thread_id, state)
+                return change_response
+        
+
         state.user_message = message
-
-        # run LangGraph off the main event loop to avoid blocking
         state = await asyncio.to_thread(self.executor.invoke, state)
-
         await self._save_state(thread_id, state)
-
         reply = getattr(state, "response_message", None) or state.get("response_message")
         return reply or "Sorry, I didn't get that."
+        
+    def _handle_change_intent(self, state: SlotFillingState, message_lower: str) -> str | None:
+        """Handle intent to change a previously filled slot."""
+
+        change_parts = message_lower.split(" to ", 1)
+        if len(change_parts) != 2:
+            return None
+            
+        before_to = change_parts[0].strip()
+        after_to = change_parts[1].strip()
+        
+
+        target_slot = None
+        slot_index = -1
+        
+        for i, slot_name in enumerate(state.slot_order):
+
+            if slot_name.lower() in before_to:
+                target_slot = slot_name
+                slot_index = i
+                break
+        
+        if not target_slot or state.slot_values.get(target_slot) is None:
+            return None
+            
+        # Find the new value in available options
+        options = self._options_for_slot(state, target_slot)
+        new_value = None
+        
+        for option in options:
+            if option.lower() in after_to or after_to in option.lower():
+                new_value = option
+                break
+        
+        if not new_value:
+            return None
+            
+        # Update the slot with the new value
+        state.slot_values[target_slot] = new_value
+        
+        # Reset dependent slots
+        for j in range(slot_index + 1, len(state.slot_order)):
+            dep_slot = state.slot_order[j]
+            state.slot_values[dep_slot] = None
+            state.slot_states[dep_slot] = SlotState.EMPTY
+        
+        # Set up to prompt for the next slot
+        next_slot_index = slot_index + 1
+        if next_slot_index < len(state.slot_order):
+            next_slot = state.slot_order[next_slot_index]
+            state.current_slot_index = next_slot_index
+            state.awaiting_slot_input = True
+            
+            # Generate prompt for next slot
+            next_options = self._options_for_slot(state, next_slot)
+            state.response_message = f"Changed {target_slot} to {new_value}. Please select a {next_slot}. Options: {', '.join(next_options)}"
+            return state.response_message
+        else:
+            state.response_message = f"Changed {target_slot} to {new_value}."
+            return state.response_message

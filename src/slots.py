@@ -11,8 +11,7 @@ from dataclasses import dataclass
 from typing import TypeAlias
 
 
-# Type alias for context dictionary
-Context: TypeAlias = dict[str, str | None]
+Context: TypeAlias = dict[str, str | None]  # Type alias for context dictionary
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,30 +21,31 @@ class Slot:
     options_fn: Callable[[Context], list[str]]
 
     def options(self, ctx: Context) -> list[str]:
+        """Return the options for this slot given the conversation context."""
         return self.options_fn(ctx)
 
 
-# --------------------------------------------------------------------------- #
-#  Default slot chain used by GraphManager
-# --------------------------------------------------------------------------- #
 def build_default_slots(api) -> list[Slot]:
     """Return the canonical hospital → specialty → doctor → timeslot chain."""
-
     def hospital_options(_: Context) -> list[str]:
+        """Return the list of hospitals."""
         return api.get_hospitals()
 
     def specialty_options(ctx: Context) -> list[str]:
+        """Return the list of specialties for the selected hospital."""
         if hosp := ctx.get("hospital"):
             return api.get_specialties(hosp)
         return []
 
     def doctor_options(ctx: Context) -> list[str]:
+        """Return the list of doctors for the selected hospital and specialty."""
         hosp, spec = ctx.get("hospital"), ctx.get("specialty")
         if hosp and spec:
             return api.get_doctors(hosp, spec)
         return []
 
     def timeslot_options(ctx: Context) -> list[str]:
+        """Return the list of available appointment slots for the selected doctor, specialty, and hospital."""
         hosp, spec, doc = (
             ctx.get("hospital"),
             ctx.get("specialty"),

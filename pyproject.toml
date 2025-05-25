@@ -1,10 +1,31 @@
 [project]
 name = "slot-graph-scheduler"
 version = "0.1.0"
-description = "Add your description here"
+description = "Medical appointment scheduler using FastAPI and LangGraph"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi[standard]>=0.115.12",
     "langgraph>=0.4.7",
+    "pytest>=8.3.5",
+    "pytest-asyncio>=0.26.0",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+]
+
+[tool.pytest.ini_options]
+pythonpath = [
+    ".",
 ]
